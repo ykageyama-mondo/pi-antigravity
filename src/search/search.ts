@@ -182,6 +182,12 @@ export function buildSearchRequest(
         },
       ],
       tools,
+      // Cloud Code Assist requires explicit built-in tool context circulation.
+      // AUTO is unsupported when server-side tool invocations are included.
+      toolConfig: {
+        includeServerSideToolInvocations: true,
+        functionCallingConfig: { mode: "VALIDATED" },
+      },
       generationConfig,
     },
     requestType: AntigravityRequestType.Agent,
@@ -910,7 +916,19 @@ export async function executeAntigravitySearch(options: ExecuteSearchOptions): P
   let lastError = "no endpoint available";
 
   for (const model of SEARCH_MODEL_FALLBACKS) {
-    const body = JSON.stringify(buildSearchRequest(options, model, creds.projectId));
+    const payload = buildSearchRequest(options, model, creds.projectId);
+    const body = JSON.stringify(payload);
+    // Only inspect allowlisted configuration: never log headers, credentials,
+    // project IDs, contents, system instructions, or caller-supplied URLs.
+    const wireRequest = isRecord(payload.request) ? payload.request : {};
+    const requestDiagnostic = JSON.stringify({
+      diagnosticVersion: "search-tool-config-v1",
+      model,
+      toolTypes: Array.isArray(wireRequest.tools)
+        ? wireRequest.tools.flatMap((tool) => (isRecord(tool) ? Object.keys(tool) : []))
+        : [],
+      toolConfig: wireRequest.toolConfig,
+    });
 
     for (const endpoint of endpointCandidates()) {
       if (options.signal?.aborted) throw new Error("Search request was aborted");
@@ -925,6 +943,9 @@ export async function executeAntigravitySearch(options: ExecuteSearchOptions): P
 
         if (!response.ok) {
           lastError = jsonOrTextError(await response.text()).slice(0, 400);
+          if (/include_server_side_tool_invocations/i.test(lastError)) {
+            lastError += `\nOutgoing request configuration: ${requestDiagnostic}`;
+          }
           const modelRejected =
             response.status === 400 && /invalid argument|thinking/i.test(lastError);
           if (
